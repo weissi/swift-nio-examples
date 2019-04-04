@@ -81,7 +81,7 @@ _ = try! server.start(host: address.0, port: address.1).wait()
 group.enter()
 let signalSource = trap(signal: Signal.INT) { signal in
     print("intercepted signal: \(signal)")
-    server.stop().whenComplete {
+    server.stop().whenComplete { _ in
         group.leave()
     }
 }

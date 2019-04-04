@@ -21,45 +21,53 @@ public final class TCPServer {
     public func start(host: String, port: Int) -> EventLoopFuture<TCPServer> {
         assert(.initializing == self.state)
 
-        let framingHandler: ChannelHandler
+        let inboundFramingHandler: ChannelHandler
+        let outboundFramingHandler: ChannelHandler
         switch self.config.framing {
         case .jsonpos:
-            framingHandler = JsonPosCodec()
+            let framingHandler = JsonPosCodec()
+            inboundFramingHandler = ByteToMessageHandler(framingHandler)
+            outboundFramingHandler = MessageToByteHandler(framingHandler)
         case .brute:
-            framingHandler = BruteForceCodec<JSONRequest>()
+            let framingHandler = BruteForceCodec<JSONResponse>()
+            inboundFramingHandler = ByteToMessageHandler(framingHandler)
+            outboundFramingHandler = MessageToByteHandler(framingHandler)
         case .default:
-            framingHandler = NewlineCodec()
+            let framingHandler = NewlineCodec()
+            inboundFramingHandler = ByteToMessageHandler(framingHandler)
+            outboundFramingHandler = MessageToByteHandler(framingHandler)
         }
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.add(handler: IdleStateHandler(readTimeout: self.config.timeout))
-                    .then { channel.pipeline.add(handler: framingHandler) }
-                    .then { channel.pipeline.add(handler: CodableCodec<JSONRequest, JSONResponse>()) }
-                    .then { channel.pipeline.add(handler: Handler(self.closure)) }
+                channel.pipeline.addHandlers([IdleStateHandler(readTimeout: self.config.timeout),
+                                              inboundFramingHandler,
+                                              outboundFramingHandler,
+                                              CodableCodec<JSONRequest, JSONResponse>(),
+                                              Handler(self.closure)])
             }
             .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
 
         self.state = .starting("\(host):\(port)")
-        return bootstrap.bind(host: host, port: port).then { channel in
+        return bootstrap.bind(host: host, port: port).flatMap { channel in
             self.channel = channel
             self.state = .started
-            return channel.eventLoop.newSucceededFuture(result: self)
+            return channel.eventLoop.makeSucceededFuture(self)
         }
     }
 
     public func stop() -> EventLoopFuture<Void> {
         if .started != self.state {
-            return self.group.next().newFailedFuture(error: ServerError.notReady)
+            return self.group.next().makeFailedFuture(ServerError.notReady)
         }
         guard let channel = self.channel else {
-            return self.group.next().newFailedFuture(error: ServerError.notReady)
+            return self.group.next().makeFailedFuture(ServerError.notReady)
         }
         self.state = .stopping
-        channel.closeFuture.whenComplete {
+        channel.closeFuture.whenComplete { _ in
             self.state = .stopped
         }
         return channel.close()
@@ -110,7 +118,7 @@ private class Handler: ChannelInboundHandler {
         self.closure = closure
     }
 
-    public func channelRead(ctx: ChannelHandlerContext, data: NIOAny) {
+    public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let request = unwrapInboundIn(data)
         self.closure(request.method, RPCObject(request.params), { result in
             let response: JSONResponse
@@ -122,46 +130,46 @@ private class Handler: ChannelInboundHandler {
                 print("rpc handler returned failure", handlerError)
                 response = JSONResponse(id: request.id, error: handlerError)
             }
-            ctx.channel.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
+            context.channel.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
         })
     }
 
-    public func errorCaught(ctx: ChannelHandlerContext, error: Error) {
-        if let remoteAddress = ctx.remoteAddress {
+    public func errorCaught(context: ChannelHandlerContext, error: Error) {
+        if let remoteAddress = context.remoteAddress {
             print("client", remoteAddress, "error", error)
         }
         switch error {
         case CodecError.badFraming, CodecError.badJson:
             let response = JSONResponse(id: "unknown", errorCode: .parseError, error: error)
-            ctx.channel.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
+            context.channel.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
         case CodecError.requestTooLarge:
             let response = JSONResponse(id: "unknown", errorCode: .invalidRequest, error: error)
-            ctx.channel.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
+            context.channel.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
         default:
             let response = JSONResponse(id: "unknown", errorCode: .internalError, error: error)
-            ctx.channel.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
+            context.channel.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
         }
         // close the client connection
-        ctx.close(promise: nil)
+        context.close(promise: nil)
     }
 
-    public func channelActive(ctx: ChannelHandlerContext) {
-        if let remoteAddress = ctx.remoteAddress {
+    public func channelActive(context: ChannelHandlerContext) {
+        if let remoteAddress = context.remoteAddress {
             print("client", remoteAddress, "connected")
         }
     }
 
-    public func channelInactive(ctx: ChannelHandlerContext) {
-        if let remoteAddress = ctx.remoteAddress {
+    public func channelInactive(context: ChannelHandlerContext) {
+        if let remoteAddress = context.remoteAddress {
             print("client", remoteAddress, "disconnected")
         }
     }
 
-    func userInboundEventTriggered(ctx: ChannelHandlerContext, event: Any) {
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if (event as? IdleStateHandler.IdleStateEvent) == .read {
-            self.errorCaught(ctx: ctx, error: ServerError.timeout)
+            self.errorCaught(context: context, error: ServerError.timeout)
         } else {
-            ctx.fireUserInboundEventTriggered(event)
+            context.fireUserInboundEventTriggered(event)
         }
     }
 }

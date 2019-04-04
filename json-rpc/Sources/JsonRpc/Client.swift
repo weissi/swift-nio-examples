@@ -20,42 +20,50 @@ public final class TCPClient {
     public func connect(host: String, port: Int) -> EventLoopFuture<TCPClient> {
         assert(.initializing == self.state)
 
-        let framingHandler: ChannelHandler
+        let inboundFramingHandler: ChannelHandler
+        let outboundFramingHandler: ChannelHandler
         switch self.config.framing {
         case .jsonpos:
-            framingHandler = JsonPosCodec()
+            let framingHandler = JsonPosCodec()
+            inboundFramingHandler = ByteToMessageHandler(framingHandler)
+            outboundFramingHandler = MessageToByteHandler(framingHandler)
         case .brute:
-            framingHandler = BruteForceCodec<JSONResponse>()
+            let framingHandler = BruteForceCodec<JSONResponse>()
+            inboundFramingHandler = ByteToMessageHandler(framingHandler)
+            outboundFramingHandler = MessageToByteHandler(framingHandler)
         case .default:
-            framingHandler = NewlineCodec()
+            let framingHandler = NewlineCodec()
+            inboundFramingHandler = ByteToMessageHandler(framingHandler)
+            outboundFramingHandler = MessageToByteHandler(framingHandler)
         }
 
         let bootstrap = ClientBootstrap(group: self.group)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .channelInitializer { channel in
-                channel.pipeline.add(handler: IdleStateHandler(readTimeout: self.config.timeout))
-                    .then { channel.pipeline.add(handler: framingHandler) }
-                    .then { channel.pipeline.add(handler: CodableCodec<JSONResponse, JSONRequest>()) }
-                    .then { channel.pipeline.add(handler: Handler()) }
+                channel.pipeline.addHandlers([IdleStateHandler(readTimeout: self.config.timeout),
+                                              inboundFramingHandler,
+                                              outboundFramingHandler,
+                                              CodableCodec<JSONResponse, JSONRequest>(),
+                                              Handler()])
             }
 
         self.state = .connecting("\(host):\(port)")
-        return bootstrap.connect(host: host, port: port).then { channel in
+        return bootstrap.connect(host: host, port: port).flatMap { channel in
             self.channel = channel
             self.state = .connected
-            return channel.eventLoop.newSucceededFuture(result: self)
+            return channel.eventLoop.makeSucceededFuture(self)
         }
     }
 
     public func disconnect() -> EventLoopFuture<Void> {
         if .connected != self.state {
-            return self.group.next().newFailedFuture(error: ClientError.notReady)
+            return self.group.next().makeFailedFuture(ClientError.notReady)
         }
         guard let channel = self.channel else {
-            return self.group.next().newFailedFuture(error: ClientError.notReady)
+            return self.group.next().makeFailedFuture(ClientError.notReady)
         }
         self.state = .disconnecting
-        channel.closeFuture.whenComplete {
+        channel.closeFuture.whenComplete { _ in
             self.state = .disconnected
         }
         channel.close(promise: nil)
@@ -64,17 +72,17 @@ public final class TCPClient {
 
     public func call(method: String, params: RPCObject) -> EventLoopFuture<Result> {
         if .connected != self.state {
-            return self.group.next().newFailedFuture(error: ClientError.notReady)
+            return self.group.next().makeFailedFuture(ClientError.notReady)
         }
         guard let channel = self.channel else {
-            return self.group.next().newFailedFuture(error: ClientError.notReady)
+            return self.group.next().makeFailedFuture(ClientError.notReady)
         }
-        let promise: EventLoopPromise<JSONResponse> = channel.eventLoop.newPromise()
+        let promise: EventLoopPromise<JSONResponse> = channel.eventLoop.makePromise()
         let request = JSONRequest(id: NSUUID().uuidString, method: method, params: JSONObject(params))
         let requestWrapper = JSONRequestWrapper(request: request, promise: promise)
         let future = channel.writeAndFlush(requestWrapper)
-        future.cascadeFailure(promise: promise) // if write fails
-        return future.then {
+        future.cascadeFailure(to: promise) // if write fails
+        return future.flatMap {
             promise.futureResult.map { Result($0) }
         }
     }
@@ -161,62 +169,62 @@ private class Handler: ChannelInboundHandler, ChannelOutboundHandler {
     private var queue = CircularBuffer<(String, EventLoopPromise<JSONResponse>)>()
 
     // outbound
-    public func write(ctx: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+    public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
         let requestWrapper = self.unwrapOutboundIn(data)
         queue.append((requestWrapper.request.id, requestWrapper.promise))
-        ctx.write(wrapOutboundOut(requestWrapper.request), promise: promise)
+        context.write(wrapOutboundOut(requestWrapper.request), promise: promise)
     }
 
     // inbound
-    public func channelRead(ctx: ChannelHandlerContext, data: NIOAny) {
+    public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         if self.queue.isEmpty {
-            return ctx.fireChannelRead(data) // already complete
+            return context.fireChannelRead(data) // already complete
         }
         let promise = queue.removeFirst().1
         let response = unwrapInboundIn(data)
-        promise.succeed(result: response)
+        promise.succeed(response)
     }
 
-    public func errorCaught(ctx: ChannelHandlerContext, error: Error) {
-        if let remoteAddress = ctx.remoteAddress {
+    public func errorCaught(context: ChannelHandlerContext, error: Error) {
+        if let remoteAddress = context.remoteAddress {
             print("server", remoteAddress, "error", error)
         }
         if self.queue.isEmpty {
-            return ctx.fireErrorCaught(error) // already complete
+            return context.fireErrorCaught(error) // already complete
         }
         let item = queue.removeFirst()
         let requestId = item.0
         let promise = item.1
         switch error {
         case CodecError.requestTooLarge, CodecError.badFraming, CodecError.badJson:
-            promise.succeed(result: JSONResponse(id: requestId, errorCode: .parseError, error: error))
+            promise.succeed(JSONResponse(id: requestId, errorCode: .parseError, error: error))
         default:
-            promise.fail(error: error)
+            promise.fail(error)
             // close the connection
-            ctx.close(promise: nil)
+            context.close(promise: nil)
         }
     }
 
-    public func channelActive(ctx: ChannelHandlerContext) {
-        if let remoteAddress = ctx.remoteAddress {
+    public func channelActive(context: ChannelHandlerContext) {
+        if let remoteAddress = context.remoteAddress {
             print("server", remoteAddress, "connected")
         }
     }
 
-    public func channelInactive(ctx: ChannelHandlerContext) {
-        if let remoteAddress = ctx.remoteAddress {
+    public func channelInactive(context: ChannelHandlerContext) {
+        if let remoteAddress = context.remoteAddress {
             print("server ", remoteAddress, "disconnected")
         }
         if !self.queue.isEmpty {
-            self.errorCaught(ctx: ctx, error: ClientError.connectionResetByPeer)
+            self.errorCaught(context: context, error: ClientError.connectionResetByPeer)
         }
     }
 
-    func userInboundEventTriggered(ctx: ChannelHandlerContext, event: Any) {
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if (event as? IdleStateHandler.IdleStateEvent) == .read {
-            self.errorCaught(ctx: ctx, error: ClientError.timeout)
+            self.errorCaught(context: context, error: ClientError.timeout)
         } else {
-            ctx.fireUserInboundEventTriggered(event)
+            context.fireUserInboundEventTriggered(event)
         }
     }
 }

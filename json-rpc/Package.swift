@@ -1,4 +1,5 @@
-// swift-tools-version:4.0
+// swift-tools-version:5.0
+// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
@@ -7,7 +8,7 @@ var targets: [PackageDescription.Target] = [
     .target(name: "ServerExample", dependencies: ["JSONRPC"]),
     .target(name: "ClientExample", dependencies: ["JSONRPC"]),
     .target(name: "LightsdDemo", dependencies: ["JSONRPC"]),
-    .testTarget(name: "JsonRpcTests", dependencies: ["JSONRPC"]),
+    .testTarget(name: "JSONRPCTests", dependencies: ["JSONRPC"]),
 ]
 
 let package = Package(
@@ -19,7 +20,7 @@ let package = Package(
         .executable(name: "LightsdDemo", targets: ["LightsdDemo"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", .upToNextMajor(from: "1.9.5")),
+        .package(url: "https://github.com/apple/swift-nio", from: "2.0.0"),
     ],
     targets: targets
 )

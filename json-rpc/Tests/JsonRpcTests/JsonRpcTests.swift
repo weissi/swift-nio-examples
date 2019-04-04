@@ -3,7 +3,7 @@ import NIO
 import XCTest
 
 final class JsonRpcTests: XCTestCase {
-    func testSucess() {
+    func testSuccess() {
         let expectedMethod = "foo"
         let expectedParams = RPCObject(["bar", "baz"])
         let expectedResponse = RPCObject("yay")
@@ -444,16 +444,16 @@ private class BadServer {
     func start(host: String, port: Int) -> EventLoopFuture<BadServer> {
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
-            .childChannelInitializer { channel in channel.pipeline.add(handler: Handler(framing: self.framing)) }
-        return bootstrap.bind(host: host, port: port).then { channel in
+            .childChannelInitializer { channel in channel.pipeline.addHandler(Handler(framing: self.framing)) }
+        return bootstrap.bind(host: host, port: port).flatMap { channel in
             self.channel = channel
-            return channel.eventLoop.newSucceededFuture(result: self)
+            return channel.eventLoop.makeSucceededFuture(self)
         }
     }
 
     func stop() -> EventLoopFuture<Void> {
         guard let channel = self.channel else {
-            return self.group.next().newFailedFuture(error: TestError.badState)
+            return self.group.next().makeFailedFuture(TestError.badState)
         }
         channel.close(promise: nil)
         return channel.closeFuture
@@ -469,7 +469,7 @@ private class BadServer {
             self.framing = framing
         }
 
-        public func channelRead(ctx: ChannelHandlerContext, data: NIOAny) {
+        public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             var buffer = unwrapInboundIn(data)
             let data = decode(&buffer, self.framing)
             do {
@@ -478,14 +478,14 @@ private class BadServer {
                     return
                 }
                 if "disconnect" == request.method {
-                    return ctx.channel.close(promise: nil)
+                    return context.channel.close(promise: nil)
                 }
                 let encoded = "do not encode" != request.method ? encode(request.method, self.framing) : request.method
-                var bufffer2 = ctx.channel.allocator.buffer(capacity: encoded.utf8.count)
-                bufffer2.write(bytes: encoded.utf8)
-                ctx.writeAndFlush(NIOAny(bufffer2), promise: nil)
+                var bufffer2 = context.channel.allocator.buffer(capacity: encoded.utf8.count)
+                bufffer2.writeBytes(encoded.utf8)
+                context.writeAndFlush(NIOAny(bufffer2), promise: nil)
             } catch {
-                ctx.fireErrorCaught(error)
+                context.fireErrorCaught(error)
             }
         }
     }
@@ -504,16 +504,16 @@ private class BadClient {
 
     public func connect(host: String, port: Int) -> EventLoopFuture<BadClient> {
         let bootstrap = ClientBootstrap(group: self.group)
-            .channelInitializer { channel in channel.pipeline.add(handler: Handler(framing: self.framing)) }
-        return bootstrap.connect(host: host, port: port).then { channel in
+            .channelInitializer { channel in channel.pipeline.addHandler(Handler(framing: self.framing)) }
+        return bootstrap.connect(host: host, port: port).flatMap { channel in
             self.channel = channel
-            return channel.eventLoop.newSucceededFuture(result: self)
+            return channel.eventLoop.makeSucceededFuture(self)
         }
     }
 
     public func disconnect() -> EventLoopFuture<Void> {
         guard let channel = self.channel else {
-            return self.group.next().newFailedFuture(error: TestError.badState)
+            return self.group.next().makeFailedFuture(TestError.badState)
         }
         channel.close(promise: nil)
         return channel.closeFuture
@@ -521,15 +521,15 @@ private class BadClient {
 
     public func request(string: String) -> EventLoopFuture<JSONResponse> {
         guard let channel = self.channel else {
-            return self.group.next().newFailedFuture(error: TestError.badState)
+            return self.group.next().makeFailedFuture(TestError.badState)
         }
-        let promise: EventLoopPromise<JSONResponse> = channel.eventLoop.newPromise()
+        let promise: EventLoopPromise<JSONResponse> = channel.eventLoop.makePromise()
         let encoded = string != "do not encode" ? encode(string, self.framing) : string
         var buffer = channel.allocator.buffer(capacity: encoded.utf8.count)
-        buffer.write(bytes: encoded.utf8)
+        buffer.writeBytes(encoded.utf8)
         let future = channel.writeAndFlush(RequestWrapper(promise: promise, request: buffer))
-        future.cascadeFailure(promise: promise)
-        return future.then {
+        future.cascadeFailure(to: promise)
+        return future.flatMap {
             promise.futureResult
         }
     }
@@ -546,21 +546,21 @@ private class BadClient {
             self.framing = framing
         }
 
-        public func write(ctx: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
             let wrapper = self.unwrapOutboundIn(data)
             queue.append(wrapper.promise)
-            ctx.write(wrapOutboundOut(wrapper.request), promise: promise)
+            context.write(wrapOutboundOut(wrapper.request), promise: promise)
         }
 
-        public func channelRead(ctx: ChannelHandlerContext, data: NIOAny) {
+        public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             let promise = queue.removeFirst()
             var buffer = unwrapInboundIn(data)
             let data = decode(&buffer, self.framing)
             do {
                 let response = try JSONDecoder().decode(JSONResponse.self, from: data)
-                promise.succeed(result: response)
+                promise.succeed(response)
             } catch {
-                promise.fail(error: error)
+                promise.fail(error)
             }
         }
     }
