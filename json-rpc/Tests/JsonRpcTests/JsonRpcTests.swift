@@ -300,7 +300,7 @@ final class JsonRpcTests: XCTestCase {
         _ = try! client.connect(host: address.0, port: address.1).wait()
         // perform the method call
         XCTAssertThrowsError(try client.call(method: "timeout", params: .none).wait()) { error in
-            XCTAssertEqual(error as! ClientError, ClientError.timeout)
+            XCTAssertEqual(error as! ClientError, ClientError.connectionResetByPeer)
         }
         // shutdown
         try! client.disconnect().wait()

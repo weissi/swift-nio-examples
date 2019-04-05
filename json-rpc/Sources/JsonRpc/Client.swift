@@ -1,6 +1,18 @@
 import Foundation
 import NIO
 
+private final class CloseOnTimeoutError: ChannelInboundHandler {
+    typealias InboundIn = Any
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if event is IdleStateHandler.IdleStateEvent {
+            context.channel.close(promise: nil)
+        } else {
+            context.fireUserInboundEventTriggered(event)
+        }
+    }
+}
+
 public final class TCPClient {
     public let group: EventLoopGroup
     public let config: Config
@@ -41,6 +53,7 @@ public final class TCPClient {
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .channelInitializer { channel in
                 channel.pipeline.addHandlers([IdleStateHandler(readTimeout: self.config.timeout),
+                                              CloseOnTimeoutError(),
                                               inboundFramingHandler,
                                               outboundFramingHandler,
                                               CodableCodec<JSONResponse, JSONRequest>(),

@@ -15,13 +15,6 @@ public class NewlineCodec: ByteToMessageDecoder, MessageToByteEncoder {
     private let delimiter2: UInt8 = 0x0A // '\n'
     private var delimiterBuffer: ByteBuffer?
 
-    public var cumulationBuffer: ByteBuffer?
-
-    public func handlerAdded(context: ChannelHandlerContext) {
-        self.delimiterBuffer = context.channel.allocator.buffer(capacity: 2)
-        self.delimiterBuffer!.writeBytes([delimiter1, delimiter2])
-    }
-
     // inbound
     public func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
         let readable: Int? = try buffer.withUnsafeReadableBytes { bytes in
@@ -68,15 +61,6 @@ public class NewlineCodec: ByteToMessageDecoder, MessageToByteEncoder {
         // add delimiter
         out.writeBytes([delimiter1, delimiter2]) // FIXME:
     }
-
-    /*public func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        if (event as? IdleStateHandler.IdleStateEvent) == .read, self.cumulationBuffer?.readableBytes ?? 0 > 0 {
-            // we got something but then timedout, so probably not be a json
-            context.fireErrorCaught(CodecError.badFraming)
-        } else {
-            context.fireUserInboundEventTriggered(event)
-        }
-    }*/
 }
 
 // https://www.poplatek.fi/payments/jsonpos/transport
@@ -163,15 +147,6 @@ internal final class JsonPosCodec: ByteToMessageDecoder, MessageToByteEncoder {
         // newline
         out.writeBytes([newline]) // FIXME:
     }
-
-    /*public func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        if (event as? IdleStateHandler.IdleStateEvent) == .read, self.cumulationBuffer?.readableBytes ?? 0 > 0 {
-            // we got something but then timedout, so probably not be a valid frame
-            context.fireErrorCaught(CodecError.badFraming)
-        } else {
-            context.fireUserInboundEventTriggered(event)
-        }
-    }*/
 }
 
 // no delimeter is provided, brute force try to decode the json
@@ -183,13 +158,9 @@ internal final class BruteForceCodec<T>: ByteToMessageDecoder, MessageToByteEnco
 
     private let last: UInt8 = 0x7D // '}'
 
-    public var cumulationBuffer: ByteBuffer?
-
     public func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
         let readable: Int? = try buffer.withUnsafeReadableBytes { bytes in
             if bytes.count >= maxPayload {
-                //context.fireErrorCaught(CodecError.requestTooLarge)
-                //return nil
                 throw CodecError.requestTooLarge
             }
             if last != bytes[bytes.count - 1] {
@@ -201,10 +172,7 @@ internal final class BruteForceCodec<T>: ByteToMessageDecoder, MessageToByteEnco
                 return bytes.count
             } catch is DecodingError {
                 return nil
-            } /*catch {
-                context.fireErrorCaught(error)
-                return nil
-            }*/
+            }
         }
         guard let length = readable else {
             return .needMoreData
@@ -230,15 +198,6 @@ internal final class BruteForceCodec<T>: ByteToMessageDecoder, MessageToByteEnco
         var payload = data
         out.writeBuffer(&payload)
     }
-
-    /*public func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        if (event as? IdleStateHandler.IdleStateEvent) == .read, self.cumulationBuffer?.readableBytes ?? 0 > 0 {
-            // we got something but then timedout, so probably not be a valid frame
-            context.fireErrorCaught(CodecError.badFraming)
-        } else {
-            context.fireUserInboundEventTriggered(event)
-        }
-    }*/
 }
 
 // bytes to codable and back
