@@ -5,53 +5,13 @@ import NIOFoundationCompat
 private let maxPayload = 1_000_000 // 1MB
 
 // aggregate bytes till delimiter and add delimiter at end
-public class NewlineCodec: ByteToMessageDecoder, MessageToByteEncoder {
-    public typealias InboundIn = ByteBuffer
-    public typealias InboundOut = ByteBuffer
+public class NewlineEncoder: MessageToByteEncoder {
     public typealias OutboundIn = ByteBuffer
     public typealias OutboundOut = ByteBuffer
 
     private let delimiter1: UInt8 = 0x0D // '\r'
     private let delimiter2: UInt8 = 0x0A // '\n'
     private var delimiterBuffer: ByteBuffer?
-
-    // inbound
-    public func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
-        let readable: Int? = try buffer.withUnsafeReadableBytes { bytes in
-            if bytes.count >= maxPayload {
-                //context.fireErrorCaught(CodecError.requestTooLarge)
-                //return nil
-                throw CodecError.requestTooLarge
-            }
-            if bytes.count < 3 {
-                return nil
-            }
-            // try to find a json payload looking \r\n
-            for i in 1 ..< bytes.count {
-                if bytes[i - 1] == delimiter1, bytes[i] == delimiter2 {
-                    return i - 1
-                }
-            }
-            return nil
-        }
-        guard let r = readable else {
-            return .needMoreData
-        }
-        // slice the buffer
-        let slice = buffer.readSlice(length: r)!
-        buffer.moveReaderIndex(forwardBy: 1)
-        // call next handler
-        context.fireChannelRead(wrapInboundOut(slice))
-        return .continue
-    }
-
-    public func decodeLast(context: ChannelHandlerContext, buffer: inout ByteBuffer, seenEOF: Bool) throws -> DecodingState {
-        while try self.decode(context: context, buffer: &buffer) == .continue {}
-        if buffer.readableBytes > 0 {
-            throw CodecError.badFraming
-        }
-        return .needMoreData
-    }
 
     // outbound
     public func encode(data: OutboundIn, out: inout ByteBuffer) throws {
@@ -75,8 +35,8 @@ internal final class JsonPosCodec: ByteToMessageDecoder, MessageToByteEncoder {
     public typealias OutboundIn = ByteBuffer
     public typealias OutboundOut = ByteBuffer
 
-    private let newline: UInt8 = 0x0A // '\n'
-    private let colon: UInt8 = 0x3A // ':'
+    private let newline = UInt8(ascii: "\n")
+    private let colon = UInt8(ascii: ":")
 
     public var cumulationBuffer: ByteBuffer?
 
@@ -92,36 +52,34 @@ internal final class JsonPosCodec: ByteToMessageDecoder, MessageToByteEncoder {
 
     // inbound
     public func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
-        let payloadSize: Int? = try buffer.withUnsafeReadableBytes { bytes in
-            if bytes.count >= maxPayload {
-                //context.fireErrorCaught(CodecError.requestTooLarge)
-                //return nil
-                throw CodecError.requestTooLarge
-            }
-            if bytes.count < 10 {
-                return nil
-            }
-            guard let hex = String(bytes: bytes[0 ..< 8], encoding: .utf8), let payloadSize = Int(hex, radix: 16) else {
-                //context.fireErrorCaught(CodecError.badFraming)
-                //return nil
-                throw CodecError.badFraming
-            }
-            if colon != bytes[8] {
-                //context.fireErrorCaught(CodecError.badFraming)
-                //return nil
-                throw CodecError.badFraming
-            }
-            if bytes.count < payloadSize + 10 || newline != bytes[bytes.count - 1] {
-                return nil
-            }
-            return payloadSize
+        guard buffer.readableBytes < maxPayload else {
+            throw CodecError.requestTooLarge
         }
-        guard let length = payloadSize else {
+        guard buffer.readableBytes >= 10 else {
             return .needMoreData
         }
+        let readableBytesView = buffer.readableBytesView
+        // assuming we have the format <length>:<payload>\n
+        let lengthView = readableBytesView.prefix(8)       // contains <length>
+        let fromColonView = readableBytesView.dropFirst(8) // contains :<payload>\n
+        let payloadView = fromColonView.dropFirst()        // contains <payload>\n
+
+        let hex = String(decoding: lengthView, as: Unicode.UTF8.self)
+        guard let payloadSize = Int(hex, radix: 16) else {
+            throw CodecError.badFraming
+        }
+        if self.colon != fromColonView.first! {
+            throw CodecError.badFraming
+        }
+
+        guard payloadView.count >= payloadSize + 1 && self.newline == payloadView.last else {
+            return .needMoreData
+        }
+
         // slice the buffer
-        let slice = buffer.getSlice(at: 9, length: length)!
-        buffer.moveReaderIndex(to: length + 10)
+        assert(payloadView.startIndex == readableBytesView.startIndex + 9)
+        let slice = buffer.getSlice(at: payloadView.startIndex, length: payloadSize)!
+        buffer.moveReaderIndex(to: payloadSize + 10)
         // call next handler
         context.fireChannelRead(wrapInboundOut(slice))
         return .continue
@@ -215,7 +173,7 @@ internal final class CodableCodec<In, Out>: ChannelInboundHandler, ChannelOutbou
         var buffer = unwrapInboundIn(data)
         let data = buffer.readData(length: buffer.readableBytes)!
         do {
-            print("--> decoding \(String(decoding: data, as: UTF8.self))")
+            print("--> decoding \(String(decoding: data[data.startIndex ..< min(data.startIndex + 100, data.endIndex)], as: UTF8.self))")
             let decodable = try self.decoder.decode(In.self, from: data)
             // call next handler
             context.fireChannelRead(wrapInboundOut(decodable))

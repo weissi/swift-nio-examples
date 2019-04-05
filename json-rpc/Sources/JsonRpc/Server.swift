@@ -21,32 +21,16 @@ public final class TCPServer {
     public func start(host: String, port: Int) -> EventLoopFuture<TCPServer> {
         assert(.initializing == self.state)
 
-        let inboundFramingHandler: ChannelHandler
-        let outboundFramingHandler: ChannelHandler
-        switch self.config.framing {
-        case .jsonpos:
-            let framingHandler = JsonPosCodec()
-            inboundFramingHandler = ByteToMessageHandler(framingHandler)
-            outboundFramingHandler = MessageToByteHandler(framingHandler)
-        case .brute:
-            let framingHandler = BruteForceCodec<JSONResponse>()
-            inboundFramingHandler = ByteToMessageHandler(framingHandler)
-            outboundFramingHandler = MessageToByteHandler(framingHandler)
-        case .default:
-            let framingHandler = NewlineCodec()
-            inboundFramingHandler = ByteToMessageHandler(framingHandler)
-            outboundFramingHandler = MessageToByteHandler(framingHandler)
-        }
-
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandlers([IdleStateHandler(readTimeout: self.config.timeout),
-                                              inboundFramingHandler,
-                                              outboundFramingHandler,
-                                              CodableCodec<JSONRequest, JSONResponse>(),
-                                              Handler(self.closure)])
+                channel.pipeline.addHandler(IdleStateHandler(readTimeout: self.config.timeout)).flatMap {
+                    channel.pipeline.addFramingHandlers(framing: self.config.framing)
+                }.flatMap {
+                    channel.pipeline.addHandlers([CodableCodec<JSONRequest, JSONResponse>(),
+                                                  Handler(self.closure)])
+                }
             }
             .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)

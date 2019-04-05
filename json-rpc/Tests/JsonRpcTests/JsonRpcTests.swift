@@ -526,7 +526,7 @@ private class BadClient {
         let promise: EventLoopPromise<JSONResponse> = channel.eventLoop.makePromise()
         let encoded = string != "do not encode" ? encode(string, self.framing) : string
         var buffer = channel.allocator.buffer(capacity: encoded.utf8.count)
-        buffer.writeBytes(encoded.utf8)
+        buffer.writeString(encoded)
         let future = channel.writeAndFlush(RequestWrapper(promise: promise, request: buffer))
         future.cascadeFailure(to: promise)
         return future.flatMap {

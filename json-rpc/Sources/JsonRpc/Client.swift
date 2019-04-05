@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import NIOExtras
 
 private final class CloseOnTimeoutError: ChannelInboundHandler {
     typealias InboundIn = Any
@@ -9,6 +10,24 @@ private final class CloseOnTimeoutError: ChannelInboundHandler {
             context.channel.close(promise: nil)
         } else {
             context.fireUserInboundEventTriggered(event)
+        }
+    }
+}
+
+extension ChannelPipeline {
+    func addFramingHandlers(framing: Framing) -> EventLoopFuture<Void> {
+        switch framing {
+        case .jsonpos:
+            let framingHandler = JsonPosCodec()
+            return self.addHandlers([ByteToMessageHandler(framingHandler),
+                                    MessageToByteHandler(framingHandler)])
+        case .brute:
+            let framingHandler = BruteForceCodec<JSONResponse>()
+            return self.addHandlers([ByteToMessageHandler(framingHandler),
+                                     MessageToByteHandler(framingHandler)])
+        case .default:
+            return self.addHandlers([ByteToMessageHandler(LineBasedFrameDecoder()),
+                                     MessageToByteHandler(NewlineEncoder())])
         }
     }
 }
@@ -32,32 +51,15 @@ public final class TCPClient {
     public func connect(host: String, port: Int) -> EventLoopFuture<TCPClient> {
         assert(.initializing == self.state)
 
-        let inboundFramingHandler: ChannelHandler
-        let outboundFramingHandler: ChannelHandler
-        switch self.config.framing {
-        case .jsonpos:
-            let framingHandler = JsonPosCodec()
-            inboundFramingHandler = ByteToMessageHandler(framingHandler)
-            outboundFramingHandler = MessageToByteHandler(framingHandler)
-        case .brute:
-            let framingHandler = BruteForceCodec<JSONResponse>()
-            inboundFramingHandler = ByteToMessageHandler(framingHandler)
-            outboundFramingHandler = MessageToByteHandler(framingHandler)
-        case .default:
-            let framingHandler = NewlineCodec()
-            inboundFramingHandler = ByteToMessageHandler(framingHandler)
-            outboundFramingHandler = MessageToByteHandler(framingHandler)
-        }
-
         let bootstrap = ClientBootstrap(group: self.group)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .channelInitializer { channel in
-                channel.pipeline.addHandlers([IdleStateHandler(readTimeout: self.config.timeout),
-                                              CloseOnTimeoutError(),
-                                              inboundFramingHandler,
-                                              outboundFramingHandler,
-                                              CodableCodec<JSONResponse, JSONRequest>(),
-                                              Handler()])
+                return channel.pipeline.addHandlers([IdleStateHandler(readTimeout: self.config.timeout),
+                                              CloseOnTimeoutError()]).flatMap {
+                    channel.pipeline.addFramingHandlers(framing: self.config.framing)
+                }.flatMap {
+                    channel.pipeline.addHandlers([CodableCodec<JSONResponse, JSONRequest>(), Handler()])
+                }
             }
 
         self.state = .connecting("\(host):\(port)")
@@ -209,7 +211,10 @@ private class Handler: ChannelInboundHandler, ChannelOutboundHandler {
         let requestId = item.0
         let promise = item.1
         switch error {
-        case CodecError.requestTooLarge, CodecError.badFraming, CodecError.badJson:
+        case CodecError.requestTooLarge,
+             CodecError.badFraming,
+             CodecError.badJson,
+             is NIOExtras.NIOExtrasErrors.LeftOverBytesError:
             promise.succeed(JSONResponse(id: requestId, errorCode: .parseError, error: error))
         default:
             promise.fail(error)
