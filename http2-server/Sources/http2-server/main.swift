@@ -99,14 +99,14 @@ default:
 //     NIOSSLCertificateSource.file("/path/to/my.cert")
 
 // Load the private key
-let sslPrivateKey = try! NIOSSLPrivateKeySource.privateKey(NIOSSLPrivateKey(buffer: [Int8](samplePKCS8PemPrivateKey.utf8CString),
-                                                                           format: .pem) { providePassword in
+let sslPrivateKey = try! NIOSSLPrivateKeySource.privateKey(NIOSSLPrivateKey(bytes: Array(samplePKCS8PemPrivateKey.utf8),
+                                                                            format: .pem) { providePassword in
                                                                             providePassword("thisisagreatpassword".utf8)
 })
 
 // Load the certificate
-let sslCertificate = try! NIOSSLCertificateSource.certificate(NIOSSLCertificate(buffer: [Int8](samplePemCert.utf8CString),
-                                                                               format: .pem))
+let sslCertificate = try! NIOSSLCertificateSource.certificate(NIOSSLCertificate(bytes: Array(samplePemCert.utf8),
+                                                                                format: .pem))
 
 // Set up the TLS configuration, it's important to set the `applicationProtocols` to
 // `NIOHTTP2SupportedALPNProtocols` which (using ALPN (https://en.wikipedia.org/wiki/Application-Layer_Protocol_Negotiation))
